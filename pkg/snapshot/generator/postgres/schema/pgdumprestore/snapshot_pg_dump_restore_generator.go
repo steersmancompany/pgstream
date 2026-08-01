@@ -589,9 +589,25 @@ func (s *SnapshotGenerator) parseDump(d []byte) *dump {
 	functionParser := &sqlFunctionParser{}
 	materializedViewNames := map[string]struct{}{}
 	skipLegacyPLPGSQLHandlerFunction := false
+	// index/trigger/comment statements are single line in most dumps, but a
+	// comment body can carry newlines, so they are accumulated until the
+	// statement actually terminates before being written to their section.
+	pendingStatement := []string{}
+	var pendingStatementDump *strings.Builder
+	flushPendingStatement := func() {
+		pendingStatementDump.WriteString(strings.Join(pendingStatement, "\n"))
+		pendingStatementDump.WriteString("\n\n")
+		pendingStatement = nil
+		pendingStatementDump = nil
+	}
 	for scanner.Scan() {
 		line := scanner.Text()
 		switch {
+		case len(pendingStatement) > 0:
+			pendingStatement = append(pendingStatement, line)
+			if statementComplete(pendingStatement) {
+				flushPendingStatement()
+			}
 		case skipLegacyPLPGSQLHandlerFunction:
 			if strings.HasSuffix(line, ";") {
 				skipLegacyPLPGSQLHandlerFunction = false
@@ -696,16 +712,20 @@ func (s *SnapshotGenerator) parseDump(d []byte) *dump {
 			viewsDump.WriteString(line)
 			viewsDump.WriteString("\n\n")
 		case isIndexStatement(line) && isIndexOnMaterializedView(line, materializedViewNames):
-			viewsDump.WriteString(line)
-			viewsDump.WriteString("\n\n")
+			pendingStatement, pendingStatementDump = []string{line}, &viewsDump
+			if statementComplete(pendingStatement) {
+				flushPendingStatement()
+			}
 		case isIndexStatement(line),
 			strings.HasPrefix(line, "CREATE CONSTRAINT"),
 			strings.HasPrefix(line, "CREATE TRIGGER"),
 			strings.HasPrefix(line, "COMMENT ON CONSTRAINT"),
 			strings.HasPrefix(line, "COMMENT ON INDEX"),
 			strings.HasPrefix(line, "COMMENT ON TRIGGER"):
-			indicesAndConstraints.WriteString(line)
-			indicesAndConstraints.WriteString("\n\n")
+			pendingStatement, pendingStatementDump = []string{line}, &indicesAndConstraints
+			if statementComplete(pendingStatement) {
+				flushPendingStatement()
+			}
 		case strings.HasPrefix(line, "ALTER TABLE") && strings.Contains(line, "ADD CONSTRAINT"):
 			indicesAndConstraints.WriteString(line)
 		case strings.HasPrefix(line, "ALTER TABLE") && isClusterOnAlterTable(line):
@@ -759,6 +779,11 @@ func (s *SnapshotGenerator) parseDump(d []byte) *dump {
 		}
 
 	}
+	// an unterminated trailing statement (malformed dump) is still written out
+	// rather than silently dropped
+	if len(pendingStatement) > 0 {
+		flushPendingStatement()
+	}
 
 	return &dump{
 		full:                      d,
@@ -770,6 +795,51 @@ func (s *SnapshotGenerator) parseDump(d []byte) *dump {
 		roles:                     dumpRoles,
 		eventTriggers:             []byte(eventTriggersDump.String()),
 	}
+}
+
+// statementComplete reports whether the accumulated lines terminate a
+// statement, i.e. whether they contain a semicolon that is not inside a string
+// literal, a quoted identifier or a line comment. pg_dump emits comment bodies
+// verbatim, so a COMMENT ON ... IS '...' can span several lines and cannot be
+// terminated by looking at a single line in isolation.
+func statementComplete(lines []string) bool {
+	s := strings.Join(lines, "\n")
+	var inSingleQuote, inDoubleQuote bool
+	for i := 0; i < len(s); i++ {
+		switch {
+		case inSingleQuote:
+			if s[i] == '\'' {
+				// '' inside a literal is an escaped quote, not the end of it
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+		case inDoubleQuote:
+			if s[i] == '"' {
+				if i+1 < len(s) && s[i+1] == '"' {
+					i++
+					continue
+				}
+				inDoubleQuote = false
+			}
+		case s[i] == '\'':
+			inSingleQuote = true
+		case s[i] == '"':
+			inDoubleQuote = true
+		case s[i] == '-' && i+1 < len(s) && s[i+1] == '-':
+			// nothing after a line comment can terminate the statement
+			nl := strings.IndexByte(s[i:], '\n')
+			if nl == -1 {
+				return false
+			}
+			i += nl
+		case s[i] == ';':
+			return true
+		}
+	}
+	return false
 }
 
 func isClusterOnAlterTable(line string) bool {
