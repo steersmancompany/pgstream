@@ -1732,6 +1732,74 @@ ALTER TABLE public.example_table CLUSTER ON example_table_created_at_idx;
 		strings.Index(string(dump.indicesAndConstraints), "CLUSTER ON example_table_created_at_idx"))
 }
 
+func TestSnapshotGenerator_parseDumpKeepsMultiLineCommentStatementsIntact(t *testing.T) {
+	t.Parallel()
+
+	// a comment body may contain newlines, semicolons and escaped quotes, so
+	// the statement cannot be terminated by inspecting a single line
+	dumpBytes := []byte(`CREATE TABLE public.example_table (
+    id bigint NOT NULL
+);
+
+COMMENT ON CONSTRAINT example_check ON public.example_table IS 'CHECK(
+    (
+        (a != b)
+        AND
+        (COALESCE(c, ''x'') = ''y'');
+    )
+)';
+
+CREATE INDEX example_table_id_idx ON public.example_table USING btree (id);
+`)
+
+	dump := (&SnapshotGenerator{}).parseDump(dumpBytes)
+
+	filtered := string(dump.filtered)
+	constraints := string(dump.indicesAndConstraints)
+
+	// the whole comment statement belongs to the constraints section
+	require.Contains(t, constraints, "COMMENT ON CONSTRAINT example_check ON public.example_table IS 'CHECK(")
+	require.Contains(t, constraints, "(COALESCE(c, ''x'') = ''y'');")
+	require.Contains(t, constraints, ")';")
+
+	// and none of its continuation lines may leak into the main dump, where
+	// they would be replayed as bare SQL fragments
+	require.NotContains(t, filtered, "(a != b)")
+	require.NotContains(t, filtered, "COALESCE(c,")
+	require.NotContains(t, filtered, "CHECK(")
+
+	// statements following the multi-line comment are still classified
+	require.Contains(t, constraints, "CREATE INDEX example_table_id_idx ON public.example_table")
+	require.Contains(t, filtered, "CREATE TABLE public.example_table")
+}
+
+func TestStatementComplete(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{name: "single line statement", lines: []string{"CREATE INDEX a ON b USING btree (c);"}, want: true},
+		{name: "unterminated single line", lines: []string{"COMMENT ON INDEX a IS 'start"}, want: false},
+		{name: "semicolon inside literal", lines: []string{"COMMENT ON INDEX a IS 'x; y"}, want: false},
+		{name: "closed across lines", lines: []string{"COMMENT ON INDEX a IS 'x", "y';"}, want: true},
+		{name: "escaped quote does not close literal", lines: []string{"COMMENT ON INDEX a IS 'it''s; here"}, want: false},
+		{name: "escaped quote then close", lines: []string{"COMMENT ON INDEX a IS 'it''s';"}, want: true},
+		{name: "semicolon in quoted identifier", lines: []string{`CREATE INDEX "a;b" ON t (c)`}, want: false},
+		{name: "trailing line comment after semicolon", lines: []string{"CREATE INDEX a ON b (c); -- note"}, want: true},
+		{name: "semicolon inside line comment only", lines: []string{"CREATE INDEX a ON b (c) -- note;"}, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, statementComplete(tc.lines))
+		})
+	}
+}
+
 func TestSnapshotGenerator_parseDumpMovesMaterializedViewIndexesToViews(t *testing.T) {
 	t.Parallel()
 
