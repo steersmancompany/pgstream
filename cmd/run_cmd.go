@@ -114,10 +114,16 @@ func initialSnapshotFlagBinding(cmd *cobra.Command) {
 		if len(viper.GetStringSlice("source.postgres.snapshot.tables")) > 0 {
 			viper.Set("source.postgres.mode", "snapshot_and_replication")
 			dataOnly, _ := cmd.Flags().GetBool("data-only")
+			// the snapshot mode has to be set on both the yaml and the env
+			// configuration keys: which of the two is read depends on whether a
+			// yaml config file was provided, and setting only the yaml one left
+			// --data-only doing nothing for flag only invocations
 			if dataOnly {
 				viper.Set("source.postgres.snapshot.mode", "data")
+				viper.Set("PGSTREAM_POSTGRES_SNAPSHOT_MODE", "data")
 			} else {
 				viper.Set("source.postgres.snapshot.mode", "full")
+				viper.Set("PGSTREAM_POSTGRES_SNAPSHOT_MODE", "full")
 				viper.Set("source.postgres.snapshot.schema.mode", "schemalog")
 				if cmd.Flags().Lookup("target").Value.String() == postgres {
 					viper.Set("source.postgres.snapshot.schema.mode", "pgdump_pgrestore")
@@ -154,9 +160,13 @@ func initialSnapshotFlagBinding(cmd *cobra.Command) {
 	}
 
 	// if the source and target are postgres, with replication + initial snapshot
-	// enabled, default to using bulk ingest if not set
+	// enabled, default to using bulk ingest if not set.
+	//
+	// the snapshot table keys are bound to stringSlice flags, so they have to be
+	// read as slices: viper.GetString cannot cast a slice and returns "", which
+	// left bulk ingest and disable_triggers off on every flag driven run
 	if viper.GetString("PGSTREAM_POSTGRES_LISTENER_URL") != "" && viper.GetString("PGSTREAM_POSTGRES_WRITER_TARGET_URL") != "" &&
-		(viper.GetString("PGSTREAM_POSTGRES_SNAPSHOT_TABLES") != "" || viper.GetString("PGSTREAM_POSTGRES_SNAPSHOT_EXCLUDED_TABLES") != "") &&
+		(len(viper.GetStringSlice("PGSTREAM_POSTGRES_SNAPSHOT_TABLES")) > 0 || len(viper.GetStringSlice("PGSTREAM_POSTGRES_SNAPSHOT_EXCLUDED_TABLES")) > 0) &&
 		viper.GetString("PGSTREAM_POSTGRES_WRITER_BULK_INGEST_ENABLED") == "" {
 		viper.Set("PGSTREAM_POSTGRES_WRITER_BULK_INGEST_ENABLED", true)
 
