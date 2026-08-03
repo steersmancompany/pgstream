@@ -23,6 +23,14 @@ type BatchWriter struct {
 
 	batchSender walMessageBatchSender
 	dmlAdapter  *dmlAdapter
+
+	// Replayed DDL is frequently unqualified, so it has to run with the search
+	// path pinned to the schema it was captured in. pgConn is a pool, so a
+	// SET and the statement that depends on it can land on different
+	// connections - and pinning cannot be done in a transaction either, since
+	// some DDL (CREATE INDEX CONCURRENTLY) cannot run inside one. A dedicated
+	// connection gives both: one session, and autocommit.
+	ddlConn pglib.Querier
 }
 
 const batchWriter = "postgres_batch_writer"
@@ -60,6 +68,11 @@ func NewBatchWriter(ctx context.Context, config *Config, opts ...WriterOption) (
 
 	if err := w.initDroppedQueriesMetric(); err != nil {
 		return nil, fmt.Errorf("initialising postgres batch writer metrics: %w", err)
+	}
+
+	bw.ddlConn, err = pglib.NewConn(ctx, config.URL)
+	if err != nil {
+		return nil, fmt.Errorf("creating postgres batch writer ddl connection: %w", err)
 	}
 
 	return bw, nil
@@ -100,7 +113,11 @@ func (w *BatchWriter) Name() string {
 func (w *BatchWriter) Close() error {
 	w.logger.Debug("closing batch writer")
 	senderErr := w.batchSender.Close()
-	return errors.Join(senderErr, w.close())
+	var ddlErr error
+	if w.ddlConn != nil {
+		ddlErr = w.ddlConn.Close(context.Background())
+	}
+	return errors.Join(senderErr, ddlErr, w.close())
 }
 
 func (w *BatchWriter) sendBatch(ctx context.Context, b *batch.Batch[*walMessage]) error {
@@ -152,20 +169,20 @@ func (w *BatchWriter) sendBatch(ctx context.Context, b *batch.Batch[*walMessage]
 					if q.IsEmpty() {
 						continue
 					}
-					// Captured DDL is replayed verbatim and is very often
-					// unqualified, so it resolves against whatever search_path
-					// this connection happens to have. The default is
-					// "$user",public, so a role sharing its name with pgstream's
-					// own internal schema silently creates the object there
-					// instead of in the target schema. Pin the path to the
-					// schema the event was captured in.
+					// The default search path is "$user",public, so a role
+					// sharing its name with pgstream's own internal schema
+					// silently creates the object there instead of in the
+					// target schema. Pin it to the schema the event was
+					// captured in. Both statements run on ddlConn so the
+					// setting is guaranteed to apply to the statement it is
+					// meant for.
 					if q.schema != "" {
-						if _, err := w.pgConn.Exec(ctx, `SELECT pg_catalog.set_config('search_path', $1, false)`, q.schema); err != nil {
+						if _, err := w.ddlConn.Exec(ctx, `SELECT pg_catalog.set_config('search_path', $1, false)`, q.schema); err != nil {
 							w.logger.Error(err, "setting search path for DDL query", loglib.Fields{"schema": q.schema})
 							return err
 						}
 					}
-					if _, err := w.pgConn.Exec(ctx, q.sql, q.args...); err != nil {
+					if _, err := w.ddlConn.Exec(ctx, q.sql, q.args...); err != nil {
 						w.logger.Error(err, "running DDL query", loglib.Fields{"query_sql": q.sql, "query_args": q.args})
 						if !w.isInternalError(err) {
 							if w.strictMode {
