@@ -248,8 +248,19 @@ func TestBatchWriter_sendBatch(t *testing.T) {
 					}
 					return f(&mockTx)
 				},
-				ExecFn: func(ctx context.Context, _ uint, sql string, args ...any) (pglib.CommandTag, error) {
-					require.Equal(t, "ALTER TABLE test_schema.test_table ADD COLUMN x text", sql)
+				ExecFn: func(ctx context.Context, i uint, sql string, args ...any) (pglib.CommandTag, error) {
+					// DDL is replayed verbatim and is frequently unqualified,
+					// so the search path is pinned to the captured schema
+					// before the statement runs.
+					switch i {
+					case 1:
+						require.Equal(t, `SELECT pg_catalog.set_config('search_path', $1, false)`, sql)
+						require.Equal(t, []any{testSchema}, args)
+					case 2:
+						require.Equal(t, "ALTER TABLE test_schema.test_table ADD COLUMN x text", sql)
+					default:
+						t.Fatalf("unexpected exec call %d: %s", i, sql)
+					}
 					return pglib.CommandTag{}, nil
 				},
 				CloseFn: func(ctx context.Context) error { return nil },
@@ -330,6 +341,9 @@ func TestBatchWriter_sendBatch(t *testing.T) {
 				},
 				dmlAdapter:  tc.dmlAdapter,
 				batchSender: batchmocks.NewBatchSender[*walMessage](),
+				// DDL runs on its own connection so the pinned search path is
+				// guaranteed to apply to the statement that needs it.
+				ddlConn: stubDDLConn{q: tc.pgconn},
 			}
 			defer writer.Close()
 
@@ -695,3 +709,9 @@ func mustNewDMLAdapter(t *testing.T) *dmlAdapter {
 	require.NoError(t, err)
 	return a
 }
+
+// stubDDLConn hands the batch writer a mock instead of dialling a real one.
+type stubDDLConn struct{ q pglib.Querier }
+
+func (s stubDDLConn) Acquire(context.Context) (pglib.Querier, error) { return s.q, nil }
+func (s stubDDLConn) Close(context.Context) error                    { return nil }
