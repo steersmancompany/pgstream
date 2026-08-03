@@ -23,6 +23,23 @@ type BatchWriter struct {
 
 	batchSender walMessageBatchSender
 	dmlAdapter  *dmlAdapter
+
+	// Replayed DDL is frequently unqualified, so it has to run with the search
+	// path pinned to the schema it was captured in. pgConn is a pool, and
+	// every Exec on it acquires and releases independently, so the SET and the
+	// statement depending on it can land on different connections. Pinning
+	// inside a transaction is not an option either: some DDL (CREATE INDEX
+	// CONCURRENTLY) cannot run in a transaction block. A lazily-opened
+	// connection keeps both statements in one session while costing nothing
+	// until a DDL event actually arrives.
+	ddlConn ddlConnection
+}
+
+// ddlConnection is the subset of pglib.LazyConn the batch writer needs, so a
+// test can supply its own connection without dialling.
+type ddlConnection interface {
+	Acquire(ctx context.Context) (pglib.Querier, error)
+	Close(ctx context.Context) error
 }
 
 const batchWriter = "postgres_batch_writer"
@@ -62,6 +79,8 @@ func NewBatchWriter(ctx context.Context, config *Config, opts ...WriterOption) (
 		return nil, fmt.Errorf("initialising postgres batch writer metrics: %w", err)
 	}
 
+	bw.ddlConn = pglib.NewLazyConn(config.URL)
+
 	return bw, nil
 }
 
@@ -100,7 +119,11 @@ func (w *BatchWriter) Name() string {
 func (w *BatchWriter) Close() error {
 	w.logger.Debug("closing batch writer")
 	senderErr := w.batchSender.Close()
-	return errors.Join(senderErr, w.close())
+	var ddlErr error
+	if w.ddlConn != nil {
+		ddlErr = w.ddlConn.Close(context.Background())
+	}
+	return errors.Join(senderErr, ddlErr, w.close())
 }
 
 func (w *BatchWriter) sendBatch(ctx context.Context, b *batch.Batch[*walMessage]) error {
@@ -152,7 +175,26 @@ func (w *BatchWriter) sendBatch(ctx context.Context, b *batch.Batch[*walMessage]
 					if q.IsEmpty() {
 						continue
 					}
-					if _, err := w.pgConn.Exec(ctx, q.sql, q.args...); err != nil {
+					// The default search path is "$user",public, so a role
+					// sharing its name with pgstream's own internal schema
+					// silently creates the object there instead of in the
+					// target schema. Pin it to the schema the event was
+					// captured in. Both statements run on the same connection,
+					// so the setting is guaranteed to apply to the statement it
+					// is meant for; nothing else uses that connection, so there
+					// is nothing to restore it to afterwards.
+					ddlConn, err := w.ddlConn.Acquire(ctx)
+					if err != nil {
+						w.logger.Error(err, "acquiring DDL connection")
+						return err
+					}
+					if q.schema != "" {
+						if _, err := ddlConn.Exec(ctx, `SELECT pg_catalog.set_config('search_path', $1, false)`, q.schema); err != nil {
+							w.logger.Error(err, "setting search path for DDL query", loglib.Fields{"schema": q.schema})
+							return err
+						}
+					}
+					if _, err := ddlConn.Exec(ctx, q.sql, q.args...); err != nil {
 						w.logger.Error(err, "running DDL query", loglib.Fields{"query_sql": q.sql, "query_args": q.args})
 						if !w.isInternalError(err) {
 							if w.strictMode {
