@@ -341,6 +341,9 @@ func TestBatchWriter_sendBatch(t *testing.T) {
 				},
 				dmlAdapter:  tc.dmlAdapter,
 				batchSender: batchmocks.NewBatchSender[*walMessage](),
+				// DDL runs on its own connection so the pinned search path is
+				// guaranteed to apply to the statement that needs it.
+				ddlConn: tc.pgconn,
 			}
 			defer writer.Close()
 
