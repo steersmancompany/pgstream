@@ -152,6 +152,19 @@ func (w *BatchWriter) sendBatch(ctx context.Context, b *batch.Batch[*walMessage]
 					if q.IsEmpty() {
 						continue
 					}
+					// Captured DDL is replayed verbatim and is very often
+					// unqualified, so it resolves against whatever search_path
+					// this connection happens to have. The default is
+					// "$user",public, so a role sharing its name with pgstream's
+					// own internal schema silently creates the object there
+					// instead of in the target schema. Pin the path to the
+					// schema the event was captured in.
+					if q.schema != "" {
+						if _, err := w.pgConn.Exec(ctx, `SELECT pg_catalog.set_config('search_path', $1, false)`, q.schema); err != nil {
+							w.logger.Error(err, "setting search path for DDL query", loglib.Fields{"schema": q.schema})
+							return err
+						}
+					}
 					if _, err := w.pgConn.Exec(ctx, q.sql, q.args...); err != nil {
 						w.logger.Error(err, "running DDL query", loglib.Fields{"query_sql": q.sql, "query_args": q.args})
 						if !w.isInternalError(err) {
