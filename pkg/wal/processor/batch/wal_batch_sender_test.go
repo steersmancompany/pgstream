@@ -834,3 +834,43 @@ func TestSender_CloseImmediately(t *testing.T) {
 		require.NoError(t, sender.Close())
 	}
 }
+
+// Messages are charged against the queue semaphore whether or not they carry
+// data, but only messages with data contribute to a batch's totalBytes.
+// Releasing totalBytes therefore strands the difference on every batch, and the
+// queue deadlocks once the stranded total reaches MaxQueueBytes. This sends far
+// more empty-message weight than the queue can hold, so it blocks forever if
+// the released weight does not match what was acquired.
+func TestSender_SendMessage_emptyMessagesDoNotLeakQueueBytes(t *testing.T) {
+	t.Parallel()
+
+	const (
+		msgSize       = 100
+		maxQueueBytes = 1000
+		msgCount      = 500 // 50x the queue: any per-message leak deadlocks
+	)
+
+	sender, err := NewSender(context.Background(), &Config{
+		MaxQueueBytes: maxQueueBytes,
+		MaxBatchBytes: 200,
+		MaxBatchSize:  10,
+		BatchTimeout:  10 * time.Millisecond,
+	}, func(context.Context, *Batch[*mockMessage]) error { return nil }, log.NewNoopLogger())
+	require.NoError(t, err)
+	defer sender.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for i := 0; i < msgCount; i++ {
+		// keep-alive shaped: no data, but still charged for its size
+		msg := &mockMessage{
+			id:        uint(i),
+			isEmptyFn: func() bool { return true },
+			sizeFn:    func() int { return msgSize },
+		}
+		if err := sender.SendMessage(ctx, NewWALMessage(msg, wal.CommitPosition("1/1"))); err != nil {
+			t.Fatalf("blocked after %d messages (queue bytes leaked): %v", i, err)
+		}
+	}
+}

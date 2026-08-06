@@ -276,7 +276,7 @@ func (s *Sender[T]) startSendDrainers(batchChan chan *Batch[T]) (*sync.WaitGroup
 				// If the send fails, the writer goroutine returns an error over
 				// the error channel and shuts down.
 				err := s.sendBatch(context.Background(), batch)
-				s.queueBytesSema.Release(int64(batch.totalBytes))
+				s.queueBytesSema.Release(batch.AcquiredBytes())
 				if err != nil {
 					if s.ignoreSendErrors {
 						s.recordDroppedBatch(err, batch)
@@ -306,7 +306,7 @@ func (s *Sender[T]) startSendDrainers(batchChan chan *Batch[T]) (*sync.WaitGroup
 			defer drainerWg.Done()
 			for batch := range batchChan {
 				err := s.sendBatch(sendCtx, batch)
-				s.queueBytesSema.Release(int64(batch.totalBytes))
+				s.queueBytesSema.Release(batch.AcquiredBytes())
 				if err != nil {
 					if s.ignoreSendErrors {
 						s.recordDroppedBatch(err, batch)
