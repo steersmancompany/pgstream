@@ -757,7 +757,7 @@ func (s *SnapshotGenerator) parseDump(d []byte) *dump {
 
 		case len(createView) > 0 || isViewStatementStart(line):
 			if len(createView) == 0 {
-				if name, ok := materializedViewName(line); ok {
+				if name, ok := materializedViewName(line); ok && !s.skipViews {
 					materializedViewNames[name] = struct{}{}
 					materializedViews = append(materializedViews, name)
 				}
@@ -766,7 +766,13 @@ func (s *SnapshotGenerator) parseDump(d []byte) *dump {
 			createView = append(createView, line)
 			if strings.HasSuffix(line, ";") {
 				statement := strings.Join(createView, "\n")
-				if !createViewIsMaterialized && isDummyViewStatement(createView) {
+				switch {
+				case s.skipViews:
+					// Dropped entirely, dummy included. pg_dump emits the dummy
+					// into the main schema dump, so skipping only the views dump
+					// would leave the stub behind - a view that exists and
+					// silently returns nothing, which is worse than no view.
+				case !createViewIsMaterialized && isDummyViewStatement(createView):
 					// pg_dump breaks circular view dependencies by emitting a
 					// dummy view (a bare SELECT of NULL casts with no FROM
 					// clause) upfront and the real definition (CREATE OR
@@ -776,7 +782,7 @@ func (s *SnapshotGenerator) parseDump(d []byte) *dump {
 					// created; it cannot depend on indices or constraints.
 					filteredDump.WriteString(statement)
 					filteredDump.WriteString("\n")
-				} else {
+				default:
 					viewsDump.WriteString(statement)
 					viewsDump.WriteString("\n\n")
 				}
@@ -789,8 +795,10 @@ func (s *SnapshotGenerator) parseDump(d []byte) *dump {
 			// with the views, after indices and constraints
 			createRule = append(createRule, line)
 			if strings.HasSuffix(line, ";") {
-				viewsDump.WriteString(strings.Join(createRule, "\n"))
-				viewsDump.WriteString("\n\n")
+				if !s.skipViews {
+					viewsDump.WriteString(strings.Join(createRule, "\n"))
+					viewsDump.WriteString("\n\n")
+				}
 				createRule = []string{}
 			}
 
