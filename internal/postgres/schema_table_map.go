@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path"
 	"slices"
 	"strings"
 )
@@ -16,9 +17,22 @@ const (
 	PublicSchema = "public"
 
 	wildcard = "*"
+
+	// patternMeta are the characters that turn a table entry from a literal
+	// name into a pattern. They match psql's own object-name pattern syntax,
+	// which is what pg_dump -T consumes, so an entry means the same thing
+	// whether it is matched here or handed to pg_dump.
+	patternMeta = "*?["
 )
 
 var ErrInvalidTableName = errors.New("invalid table name format")
+
+// IsPattern reports whether a table entry is a pattern rather than a literal
+// name. Every caller that has to tell the two apart - matching here, quoting
+// for pg_dump - asks this, so they cannot drift apart.
+func IsPattern(table string) bool {
+	return strings.ContainsAny(table, patternMeta)
+}
 
 func NewSchemaTableMap(tables []string) (SchemaTableMap, error) {
 	schemaTablesMap := make(SchemaTableMap, len(tables))
@@ -35,17 +49,69 @@ func NewSchemaTableMap(tables []string) (SchemaTableMap, error) {
 	return schemaTablesMap, nil
 }
 
+// NewSchemaTableMapFromSchemaTables builds the map from an already schema-keyed
+// table list, the shape snapshot requests carry. Same type and same matching
+// rules as NewSchemaTableMap, so a list means the same thing wherever it came
+// from.
+func NewSchemaTableMapFromSchemaTables(schemaTables map[string][]string) SchemaTableMap {
+	m := make(SchemaTableMap, len(schemaTables))
+	for schema, tables := range schemaTables {
+		m[schema] = make(map[string]struct{}, len(tables))
+		for _, table := range tables {
+			m[schema][table] = struct{}{}
+		}
+	}
+	return m
+}
+
 func (t SchemaTableMap) ContainsSchemaTable(schema, table string) bool {
 	if len(t) == 0 {
 		return false
 	}
 
 	containsTable := func(tables map[string]struct{}) bool {
-		_, found := tables[table]
-		_, wildcardFound := tables[wildcard]
-		return found || wildcardFound
+		// Literal names resolve on the map itself, so a list of thousands of
+		// exact tables still costs one lookup. Only entries carrying pattern
+		// metacharacters have to be walked, and there are typically a handful.
+		if _, found := tables[table]; found {
+			return true
+		}
+		for entry := range tables {
+			if !IsPattern(entry) {
+				continue
+			}
+			// path.Match only errors on a malformed pattern, which can never
+			// match anything, so a bad entry is skipped rather than promoted
+			// into a match.
+			if matched, err := path.Match(entry, table); err == nil && matched {
+				return true
+			}
+		}
+		return false
 	}
 	return containsTable(t[schema]) || containsTable(t[wildcard])
+}
+
+// Patterns returns the pattern entries for a schema, and Exact returns the
+// literal ones. Callers that delegate matching to something else - pg_dump has
+// its own pattern engine - need to tell them apart to hand each over correctly.
+func (t SchemaTableMap) Patterns(schema string) []string {
+	return t.partition(schema, true)
+}
+
+func (t SchemaTableMap) Exact(schema string) []string {
+	return t.partition(schema, false)
+}
+
+func (t SchemaTableMap) partition(schema string, patterns bool) []string {
+	out := []string{}
+	for entry := range t[schema] {
+		if IsPattern(entry) == patterns {
+			out = append(out, entry)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // ContainsExactSchemaTable returns true only if the table is listed by its
@@ -110,6 +176,13 @@ func (t SchemaTableMap) Add(table string) error {
 	}
 	t[schema][table] = struct{}{}
 	return nil
+}
+
+// ParseTableName splits a possibly schema-qualified table name, defaulting to
+// the public schema. Exported so that every caller splits names the same way,
+// rather than each growing its own strings.Split.
+func ParseTableName(qualifiedTableName string) (string, string, error) {
+	return parseTableName(qualifiedTableName)
 }
 
 func parseTableName(qualifiedTableName string) (string, string, error) {

@@ -5,6 +5,7 @@ package wal
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/xataio/pgstream/internal/json"
@@ -90,20 +91,60 @@ func parseDDLEvent(d *Data) (*DDLEvent, error) {
 	return &ddlEvent, nil
 }
 
+// DDL object types. These are copied verbatim from postgres' own object_type,
+// which pgstream.emit_ddl puts straight into the event, so they carry postgres'
+// spelling - "materialized view", with a space, not an underscore.
+const (
+	ObjectTypeTable            = "table"
+	ObjectTypeTableColumn      = "table column"
+	ObjectTypeMaterializedView = "materialized view"
+	ObjectTypeView             = "view"
+	ObjectTypeSequence         = "sequence"
+	ObjectTypeIndex            = "index"
+	ObjectTypeForeignTable     = "foreign table"
+)
+
+// relationObjectTypes are the object types whose identity names a relation, and
+// so can be matched against a table filter. Listed once here rather than
+// enumerated at each call site, so adding a type reaches every caller.
+var relationObjectTypes = []string{
+	ObjectTypeTable,
+	ObjectTypeTableColumn,
+	ObjectTypeMaterializedView,
+	ObjectTypeView,
+	ObjectTypeSequence,
+	ObjectTypeIndex,
+	ObjectTypeForeignTable,
+}
+
 // GetTableObjects returns only the table objects from the DDL event
 func (e *DDLEvent) GetTableObjects() []DDLObject {
-	return e.GetObjectsByType("table")
+	return e.GetObjectsByType(ObjectTypeTable)
 }
 
 // GetTableColumnObjects returns only the table column objects from the DDL event
 func (e *DDLEvent) GetTableColumnObjects() []DDLObject {
-	return e.GetObjectsByType("table column")
+	return e.GetObjectsByType(ObjectTypeTableColumn)
 }
 
 // GetMaterializedViewObjects returns only the materialized view objects from
 // the DDL event
 func (e *DDLEvent) GetMaterializedViewObjects() []DDLObject {
-	return e.GetObjectsByType("materialized_view")
+	return e.GetObjectsByType(ObjectTypeMaterializedView)
+}
+
+// GetRelationObjects returns every object in the event that names a relation.
+// Anything filtering a DDL event by table wants this rather than a hand-picked
+// subset: a statement naming an excluded materialized view or sequence is just
+// as unwanted as one naming an excluded table.
+func (e *DDLEvent) GetRelationObjects() []DDLObject {
+	objs := make([]DDLObject, 0, len(e.Objects))
+	for _, obj := range e.Objects {
+		if slices.Contains(relationObjectTypes, obj.Type) {
+			objs = append(objs, obj)
+		}
+	}
+	return objs
 }
 
 func (e *DDLEvent) GetObjectsByType(objectType string) []DDLObject {

@@ -168,6 +168,11 @@ func (o *optionGenerator) pgdumpOptions(ctx context.Context, schemaTables, schem
 		}
 	}
 
+	// pg_dump does its own matching, so exclusions are translated here rather
+	// than matched: -T takes a psql object-name pattern, where quoting a part
+	// makes it literal. Exact names are quoted so nothing in them is read as a
+	// metacharacter; patterns are left bare so pg_dump's matching applies. The
+	// schema stays quoted either way - only the table part is ever a pattern.
 	for _, schema := range slices.Sorted(maps.Keys(excludedTables)) {
 		tables := excludedTables[schema]
 		if hasWildcardTable(tables) {
@@ -175,8 +180,12 @@ func (o *optionGenerator) pgdumpOptions(ctx context.Context, schemaTables, schem
 			continue
 		}
 		for _, table := range tables {
-			if !slices.Contains(opts.ExcludeTables, pglib.QuoteQualifiedIdentifier(schema, table)) {
-				opts.ExcludeTables = append(opts.ExcludeTables, pglib.QuoteQualifiedIdentifier(schema, table))
+			excluded := pglib.QuoteQualifiedIdentifier(schema, table)
+			if pglib.IsPattern(table) {
+				excluded = pglib.QuoteIdentifier(schema) + "." + table
+			}
+			if !slices.Contains(opts.ExcludeTables, excluded) {
+				opts.ExcludeTables = append(opts.ExcludeTables, excluded)
 			}
 		}
 	}

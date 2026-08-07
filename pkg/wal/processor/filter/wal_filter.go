@@ -207,11 +207,10 @@ func (f *Filter) skipDDLEvent(event *wal.Event) bool {
 		return false
 	}
 
-	tableObjects := append(ddlEvent.GetTableObjects(), ddlEvent.GetTableColumnObjects()...)
-	for _, obj := range tableObjects {
+	for _, obj := range ddlEvent.GetRelationObjects() {
 		table := obj.GetTable()
 		if f.skipDDLTable(obj.Schema, table) {
-			f.logger.Trace("skipping DDL event", loglib.Fields{"schema": obj.Schema, "table": table})
+			f.logger.Trace("skipping DDL event", loglib.Fields{"schema": obj.Schema, "table": table, "type": obj.Type})
 			return true
 		}
 	}
