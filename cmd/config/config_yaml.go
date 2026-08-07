@@ -309,6 +309,10 @@ type FilterConfig struct {
 	IncludeTables    []string `mapstructure:"include_tables" yaml:"include_tables"`
 	ExcludeTables    []string `mapstructure:"exclude_tables" yaml:"exclude_tables"`
 	SchemaOnlyTables []string `mapstructure:"schema_only_tables" yaml:"schema_only_tables"`
+	// SkipViews drops views and materialized views from both the snapshot and
+	// the stream. One key rather than one per phase: skipping them in only one
+	// leaves the other replaying DDL for objects the target does not have.
+	SkipViews bool `mapstructure:"skip_views" yaml:"skip_views"`
 }
 
 type TransformationsConfig struct {
@@ -634,6 +638,9 @@ func (c *YAMLConfig) parseSchemaSnapshotConfig() (*snapshotbuilder.SchemaSnapsho
 		streamSchemaCfg.DumpRestore.DumpDebugFile = schemaSnapshotCfg.PgDumpPgRestore.DumpFile
 		streamSchemaCfg.DumpRestore.ExcludedSecurityLabels = schemaSnapshotCfg.PgDumpPgRestore.ExcludedSecurityLabels
 		streamSchemaCfg.DumpRestore.RefreshMaterializedViews = schemaSnapshotCfg.PgDumpPgRestore.RefreshMaterializedViews
+		if c.Modifiers.Filter != nil {
+			streamSchemaCfg.DumpRestore.SkipViews = c.Modifiers.Filter.SkipViews
+		}
 		streamSchemaCfg.DumpRestore.IndexConstraintSessionSettings = schemaSnapshotCfg.PgDumpPgRestore.IndexConstraintSessionSettings
 
 		var err error
@@ -804,6 +811,7 @@ func (c YAMLConfig) parseFilterConfig() *filter.Config {
 		ExcludeTables:    c.Modifiers.Filter.ExcludeTables,
 		IncludeTables:    c.Modifiers.Filter.IncludeTables,
 		SchemaOnlyTables: c.Modifiers.Filter.SchemaOnlyTables,
+		SkipViews:        c.Modifiers.Filter.SkipViews,
 	}
 }
 

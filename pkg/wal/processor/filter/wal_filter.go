@@ -19,6 +19,7 @@ type Filter struct {
 	includeTableMap    pglib.SchemaTableMap
 	excludeTableMap    pglib.SchemaTableMap
 	schemaOnlyTableMap pglib.SchemaTableMap
+	skipViews          bool
 	logger             loglib.Logger
 	walEventToDDLEvent func(*wal.Data) (*wal.DDLEvent, error)
 }
@@ -39,6 +40,10 @@ type Config struct {
 	// take precedence over a schema-only wildcard match, and the exclude list
 	// takes precedence over the schema-only list.
 	SchemaOnlyTables []string
+	// SkipViews drops DDL for views and materialized views. It pairs with the
+	// snapshot's own SkipViews: having skipped them there, replaying a DROP for
+	// a view the target never had would stop the stream.
+	SkipViews bool
 }
 
 type Option func(*Filter)
@@ -57,12 +62,13 @@ func New(
 	if len(cfg.ExcludeTables) > 0 && len(cfg.IncludeTables) > 0 {
 		return nil, errIncludeExcludeList
 	}
-	if len(cfg.ExcludeTables) == 0 && len(cfg.IncludeTables) == 0 && len(cfg.SchemaOnlyTables) == 0 {
+	if len(cfg.ExcludeTables) == 0 && len(cfg.IncludeTables) == 0 && len(cfg.SchemaOnlyTables) == 0 && !cfg.SkipViews {
 		return nil, errMissingFilteringConfig
 	}
 
 	f := &Filter{
 		processor:          processor,
+		skipViews:          cfg.SkipViews,
 		logger:             loglib.NewNoopLogger(),
 		walEventToDDLEvent: wal.WalDataToDDLEvent,
 	}
@@ -208,6 +214,10 @@ func (f *Filter) skipDDLEvent(event *wal.Event) bool {
 	}
 
 	for _, obj := range ddlEvent.GetRelationObjects() {
+		if f.skipViews && (obj.Type == wal.ObjectTypeView || obj.Type == wal.ObjectTypeMaterializedView) {
+			f.logger.Trace("skipping view DDL event", loglib.Fields{"schema": obj.Schema, "table": obj.GetTable(), "type": obj.Type})
+			return true
+		}
 		table := obj.GetTable()
 		if f.skipDDLTable(obj.Schema, table) {
 			f.logger.Trace("skipping DDL event", loglib.Fields{"schema": obj.Schema, "table": table, "type": obj.Type})
