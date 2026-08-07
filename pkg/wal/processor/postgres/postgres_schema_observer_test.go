@@ -758,7 +758,7 @@ func TestPGSchemaObserver_updateMaterializedViews(t *testing.T) {
 				SchemaName: testSchema,
 				Objects: []wal.DDLObject{
 					{
-						Type:     "materialized_view",
+						Type:     "materialized view",
 						Identity: "test_schema.users_mv",
 						Schema:   "test_schema",
 					},
@@ -777,7 +777,7 @@ func TestPGSchemaObserver_updateMaterializedViews(t *testing.T) {
 				SchemaName: testSchema,
 				Objects: []wal.DDLObject{
 					{
-						Type:     "materialized_view",
+						Type:     "materialized view",
 						Identity: "test_schema.users_mv",
 						Schema:   "test_schema",
 					},
@@ -799,7 +799,7 @@ func TestPGSchemaObserver_updateMaterializedViews(t *testing.T) {
 				CommandTag: "DROP MATERIALIZED VIEW",
 				Objects: []wal.DDLObject{
 					{
-						Type:     "materialized_view",
+						Type:     "materialized view",
 						Identity: "test_schema.users_mv",
 						Schema:   "test_schema",
 					},
@@ -821,7 +821,7 @@ func TestPGSchemaObserver_updateMaterializedViews(t *testing.T) {
 				CommandTag: "DROP MATERIALIZED VIEW",
 				Objects: []wal.DDLObject{
 					{
-						Type:     "materialized_view",
+						Type:     "materialized view",
 						Identity: "test_schema.users_mv",
 						Schema:   "test_schema",
 					},

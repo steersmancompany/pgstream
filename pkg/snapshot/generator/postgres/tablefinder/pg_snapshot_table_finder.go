@@ -75,7 +75,7 @@ func (s *SnapshotSchemaTableFinder) CreateSnapshot(ctx context.Context, ss *snap
 	// tables explicitly listed (no wildcards) in the snapshot request take
 	// precedence over a schema-only wildcard match, so capture them before
 	// the wildcard expansion
-	explicitTables := toSchemaTableMap(ss.SchemaTables)
+	explicitTables := pglib.NewSchemaTableMapFromSchemaTables(ss.SchemaTables)
 
 	if _, wildcardSchemaFound := ss.SchemaTables[wildcard]; wildcardSchemaFound {
 		if err := pglib.ValidateWildcardSchemaTables(ss.SchemaTables); err != nil {
@@ -102,23 +102,24 @@ func (s *SnapshotSchemaTableFinder) CreateSnapshot(ctx context.Context, ss *snap
 		}
 	}
 
-	// Remove excluded tables from the snapshot request
+	// Remove excluded tables from the snapshot request. Matching goes through
+	// the same map the replication filter uses, so an entry excludes the same
+	// tables from the initial copy as it does from the stream - including
+	// wildcards and patterns, which a plain name comparison would miss.
 	if len(ss.SchemaExcludedTables) > 0 {
+		excluded := pglib.NewSchemaTableMapFromSchemaTables(ss.SchemaExcludedTables)
 		for schema, tables := range ss.SchemaTables {
-			if excludedTables, found := ss.SchemaExcludedTables[schema]; found {
-				// Filter out the excluded tables
-				filteredTables := []string{}
-				for _, table := range tables {
-					if !slices.Contains(excludedTables, table) {
-						filteredTables = append(filteredTables, table)
-					}
+			filteredTables := []string{}
+			for _, table := range tables {
+				if !excluded.ContainsSchemaTable(schema, table) {
+					filteredTables = append(filteredTables, table)
 				}
-				if len(filteredTables) == 0 {
-					// If no tables left after filtering, remove the schema from the snapshot
-					delete(ss.SchemaTables, schema)
-				} else {
-					ss.SchemaTables[schema] = filteredTables
-				}
+			}
+			if len(filteredTables) == 0 {
+				// If no tables left after filtering, remove the schema from the snapshot
+				delete(ss.SchemaTables, schema)
+			} else {
+				ss.SchemaTables[schema] = filteredTables
 			}
 		}
 	}
@@ -128,7 +129,7 @@ func (s *SnapshotSchemaTableFinder) CreateSnapshot(ctx context.Context, ss *snap
 	// left untouched: the schema snapshot generator wrapping this one has
 	// already consumed it, resolving wildcards on its own.
 	if len(ss.SchemaOnlyTables) > 0 {
-		schemaOnlyTables := toSchemaTableMap(ss.SchemaOnlyTables)
+		schemaOnlyTables := pglib.NewSchemaTableMapFromSchemaTables(ss.SchemaOnlyTables)
 		for schema, tables := range ss.SchemaTables {
 			filteredTables := []string{}
 			for _, table := range tables {
@@ -146,17 +147,6 @@ func (s *SnapshotSchemaTableFinder) CreateSnapshot(ctx context.Context, ss *snap
 	}
 
 	return s.wrapped.CreateSnapshot(ctx, ss)
-}
-
-func toSchemaTableMap(schemaTables map[string][]string) pglib.SchemaTableMap {
-	schemaTableMap := make(pglib.SchemaTableMap, len(schemaTables))
-	for schema, tables := range schemaTables {
-		schemaTableMap[schema] = make(map[string]struct{}, len(tables))
-		for _, table := range tables {
-			schemaTableMap[schema][table] = struct{}{}
-		}
-	}
-	return schemaTableMap
 }
 
 func (s *SnapshotSchemaTableFinder) Close() error {
