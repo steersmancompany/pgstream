@@ -50,6 +50,11 @@ type SnapshotGenerator struct {
 	// restored. Disabled by default since refreshing can be expensive on large
 	// views.
 	refreshMaterializedViews bool
+	// skipViews drops views and materialized views from the snapshot entirely.
+	// They are derived data, so a replica gains nothing by carrying them, and
+	// their definitions can reference things the replica has no way to provide
+	// - a plv8 function, say - which fails the restore.
+	skipViews bool
 	// indexConstraintSessionSettings are applied through PGOPTIONS only to
 	// index and constraint restore sessions. They are cleared when restoring to
 	// WAL (see WithRestoreToWAL), since that path converts the dump into WAL
@@ -87,6 +92,8 @@ type Config struct {
 	// VIEW ... WITH DATA) after the table data has been restored. Disabled by
 	// default since refreshing can be expensive on large views.
 	RefreshMaterializedViews bool
+	// SkipViews drops views and materialized views from the snapshot.
+	SkipViews bool
 	// Session settings in name=value format applied only while restoring indexes
 	// and constraints. An empty list preserves the existing behavior.
 	IndexConstraintSessionSettings []string
@@ -159,6 +166,7 @@ func NewSnapshotGenerator(ctx context.Context, c *Config, opts ...Option) (*Snap
 		sourceQuerier:                  sourceConnPool,
 		optionGenerator:                newOptionGenerator(sourceConnPool, c),
 		refreshMaterializedViews:       c.RefreshMaterializedViews,
+		skipViews:                      c.SkipViews,
 		indexConstraintSessionSettings: c.IndexConstraintSessionSettings,
 	}
 
@@ -345,9 +353,13 @@ func (s *SnapshotGenerator) CreateSnapshot(ctx context.Context, ss *snapshot.Sna
 		return err
 	}
 
-	s.logger.Info("restoring views")
-	if err := s.restoreDump(ctx, dump.views); err != nil {
-		return err
+	if s.skipViews {
+		s.logger.Info("skipping views")
+	} else {
+		s.logger.Info("restoring views")
+		if err := s.restoreDump(ctx, dump.views); err != nil {
+			return err
+		}
 	}
 
 	if !s.refreshMaterializedViews {

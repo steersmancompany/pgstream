@@ -171,3 +171,65 @@ func TestFilter_replicationDDL_patternExclusion(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint(0), processor.GetProcessCalls(), "excluded table's DDL reached the target")
 }
+
+// skip_views drops view and materialized view DDL without naming anything, so
+// a client that adds a view later never has to be reconfigured.
+func TestFilter_replicationDDL_skipViews(t *testing.T) {
+	t.Parallel()
+
+	for _, objType := range []string{wal.ObjectTypeView, wal.ObjectTypeMaterializedView} {
+		t.Run(objType, func(t *testing.T) {
+			t.Parallel()
+
+			processor := &mocks.Processor{
+				ProcessWALEventFn: func(context.Context, *wal.Event) error { return nil },
+			}
+			f := newExcludingFilter(t, processor, []string{"public.something_else"})
+			f.skipViews = true
+
+			event := newDDLWALEvent(t, &wal.DDLEvent{
+				DDL:        "CREATE VIEW public.uom_editor AS SELECT 1;",
+				SchemaName: "public",
+				CommandTag: "CREATE VIEW",
+				Objects: []wal.DDLObject{
+					{Type: objType, Identity: "public.uom_editor", Schema: "public"},
+				},
+			})
+
+			require.NoError(t, f.ProcessWALEvent(context.Background(), event))
+			require.Equal(t, uint(0), processor.GetProcessCalls(), "view DDL reached the target")
+		})
+	}
+}
+
+// Tables must be unaffected by skip_views.
+func TestFilter_replicationDDL_skipViewsLeavesTablesAlone(t *testing.T) {
+	t.Parallel()
+
+	processor := &mocks.Processor{
+		ProcessWALEventFn: func(context.Context, *wal.Event) error { return nil },
+	}
+	f := newExcludingFilter(t, processor, []string{"public.something_else"})
+	f.skipViews = true
+
+	event := newDDLWALEvent(t, &wal.DDLEvent{
+		DDL:        "ALTER TABLE public.account_move ADD COLUMN x text;",
+		SchemaName: "public",
+		CommandTag: "ALTER TABLE",
+		Objects: []wal.DDLObject{
+			{Type: wal.ObjectTypeTable, Identity: "public.account_move", Schema: "public"},
+		},
+	})
+
+	require.NoError(t, f.ProcessWALEvent(context.Background(), event))
+	require.Equal(t, uint(1), processor.GetProcessCalls(), "table DDL was dropped by skip_views")
+}
+
+// skip_views alone is a complete filter configuration - it needs no table lists
+// to be meaningful.
+func TestFilter_skipViewsAloneIsValidConfig(t *testing.T) {
+	t.Parallel()
+
+	_, err := New(&mocks.Processor{}, &Config{SkipViews: true})
+	require.NoError(t, err)
+}
