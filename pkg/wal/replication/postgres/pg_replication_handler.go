@@ -303,9 +303,23 @@ func (h *Handler) ResetConnection(ctx context.Context) error {
 	if h.pgReplicationConn != nil {
 		h.pgReplicationConn.Close(ctx)
 	}
+	// StartReplication reads the handler's connection, so the new one has to be
+	// adopted before it runs.
 	h.pgReplicationConn = conn
 
-	return h.StartReplication(ctx)
+	if err := h.StartReplication(ctx); err != nil {
+		// Close it, or the handler is left holding a connection that replication
+		// was never started on. Nothing will ever arrive on such a connection, so
+		// the caller's next ReceiveMessage blocks forever: the retry loop never
+		// reaches a second iteration, no backoff limit can expire because backoff
+		// only advances between attempts, and the process hangs with replication
+		// dead and no error after the first. Closed, ReceiveMessage returns
+		// straight away and the retry loop keeps turning.
+		conn.Close(ctx)
+		return err
+	}
+
+	return nil
 }
 
 // GetLSNParser returns a postgres implementation of the LSN parser.
