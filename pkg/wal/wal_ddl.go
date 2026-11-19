@@ -5,6 +5,7 @@ package wal
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -168,6 +169,44 @@ func (e *DDLEvent) GetTableObjectByName(schema, table string) *DDLObject {
 
 func (e *DDLEvent) IsDropEvent() bool {
 	return strings.HasPrefix(e.CommandTag, "DROP")
+}
+
+const identifierPattern = `"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*`
+
+var (
+	createIndexTableRegex = regexp.MustCompile(`(?is)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b.*?\bON\s+(?:ONLY\s+)?(?:(` + identifierPattern + `)\.)?(` + identifierPattern + `)`)
+	renamedTableRegex     = regexp.MustCompile(`(?is)^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:(` + identifierPattern + `)\.)?(` + identifierPattern + `)\s+RENAME\s+TO\s`)
+)
+
+// IndexedTable returns the table a CREATE INDEX statement builds on. The
+// event's index object names only the index itself. schema is empty when the
+// statement leaves the table unqualified.
+func (e *DDLEvent) IndexedTable() (schema, table string, ok bool) {
+	return matchQualifiedName(createIndexTableRegex, e.DDL)
+}
+
+// RenamedTable returns the name an ALTER TABLE ... RENAME TO statement renamed
+// the table from. The event's table object carries only the new name. schema
+// is empty when the statement leaves the table unqualified.
+func (e *DDLEvent) RenamedTable() (schema, table string, ok bool) {
+	return matchQualifiedName(renamedTableRegex, e.DDL)
+}
+
+func matchQualifiedName(re *regexp.Regexp, ddl string) (schema, name string, ok bool) {
+	m := re.FindStringSubmatch(ddl)
+	if m == nil {
+		return "", "", false
+	}
+	return UnquoteIdentifier(m[1]), UnquoteIdentifier(m[2]), true
+}
+
+// UnquoteIdentifier resolves an identifier the way postgres does: a quoted one
+// is taken literally, an unquoted one is folded to lower case.
+func UnquoteIdentifier(ident string) string {
+	if strings.HasPrefix(ident, `"`) {
+		return strings.ReplaceAll(ident[1:len(ident)-1], `""`, `"`)
+	}
+	return strings.ToLower(ident)
 }
 
 // GetSchema extracts the schema name from the identity.

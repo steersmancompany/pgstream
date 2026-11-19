@@ -5,6 +5,7 @@ package filter
 import (
 	"context"
 	"errors"
+	"sync"
 
 	pglib "github.com/xataio/pgstream/internal/postgres"
 	loglib "github.com/xataio/pgstream/pkg/log"
@@ -22,6 +23,13 @@ type Filter struct {
 	skipViews          bool
 	logger             loglib.Logger
 	walEventToDDLEvent func(*wal.Data) (*wal.DDLEvent, error)
+
+	// Tables renamed away from an excluded name, which the configured
+	// patterns no longer match. Held in memory only: after a restart the new
+	// name is unfiltered until it is added to the exclude list, and its first
+	// write fails against the target, which never had the table.
+	renamedMu       sync.RWMutex
+	renamedExcluded pglib.SchemaTableMap
 }
 
 type Config struct {
@@ -71,6 +79,7 @@ func New(
 		skipViews:          cfg.SkipViews,
 		logger:             loglib.NewNoopLogger(),
 		walEventToDDLEvent: wal.WalDataToDDLEvent,
+		renamedExcluded:    pglib.SchemaTableMap{},
 	}
 
 	var err error
@@ -169,7 +178,7 @@ func (f *Filter) Close() error {
 // in the include list take precedence over a schema-only wildcard match.
 func (f *Filter) skipEvent(event *wal.Event) bool {
 	schema, table := event.Data.Schema, event.Data.Table
-	if f.excludeTableMap.ContainsSchemaTable(schema, table) {
+	if f.excludeTableMap.ContainsSchemaTable(schema, table) || f.isRenamedExcluded(schema, table) {
 		return true
 	}
 	if f.includeTableMap.ContainsExactSchemaTable(schema, table) {
@@ -188,7 +197,7 @@ func (f *Filter) skipEvent(event *wal.Event) bool {
 // skip DDL for table if it's in the exclude list, or if it's not in the
 // include table list. Schema-only tables always keep their DDL.
 func (f *Filter) skipDDLTable(schema, table string) bool {
-	if f.excludeTableMap.ContainsSchemaTable(schema, table) {
+	if f.excludeTableMap.ContainsSchemaTable(schema, table) || f.isRenamedExcluded(schema, table) {
 		return true
 	}
 	if f.schemaOnlyTableMap.ContainsSchemaTable(schema, table) {
@@ -218,11 +227,62 @@ func (f *Filter) skipDDLEvent(event *wal.Event) bool {
 			f.logger.Trace("skipping view DDL event", loglib.Fields{"schema": obj.Schema, "table": obj.GetTable(), "type": obj.Type})
 			return true
 		}
-		table := obj.GetTable()
-		if f.skipDDLTable(obj.Schema, table) {
-			f.logger.Trace("skipping DDL event", loglib.Fields{"schema": obj.Schema, "table": table, "type": obj.Type})
+		schema, table := obj.Schema, obj.GetTable()
+		if obj.Type == wal.ObjectTypeIndex {
+			if s, t, ok := ddlEvent.IndexedTable(); ok {
+				table = t
+				if s != "" {
+					schema = s
+				}
+			}
+		}
+		if f.skipDDLTable(schema, table) {
+			f.logger.Trace("skipping DDL event", loglib.Fields{"schema": schema, "table": table, "type": obj.Type})
+			return true
+		}
+		if obj.Type == wal.ObjectTypeTable && f.renamedFromExcluded(ddlEvent, obj) {
 			return true
 		}
 	}
 	return false
+}
+
+// renamedFromExcluded reports whether the event renames an excluded table. The
+// new name is excluded too, for the rest of the run, so the table's rows don't
+// start flowing to a target that never had it. Only the exclude list counts:
+// a table outside an include list renamed into it should start replicating.
+func (f *Filter) renamedFromExcluded(ddlEvent *wal.DDLEvent, obj wal.DDLObject) bool {
+	oldSchema, oldTable, ok := ddlEvent.RenamedTable()
+	if !ok {
+		return false
+	}
+	if oldSchema == "" {
+		oldSchema = obj.Schema
+	}
+	if !f.excludeTableMap.ContainsSchemaTable(oldSchema, oldTable) && !f.isRenamedExcluded(oldSchema, oldTable) {
+		return false
+	}
+
+	newTable := wal.UnquoteIdentifier(obj.GetTable())
+	f.renamedMu.Lock()
+	if f.renamedExcluded == nil {
+		f.renamedExcluded = pglib.SchemaTableMap{}
+	}
+	if f.renamedExcluded[obj.Schema] == nil {
+		f.renamedExcluded[obj.Schema] = map[string]struct{}{}
+	}
+	f.renamedExcluded[obj.Schema][newTable] = struct{}{}
+	f.renamedMu.Unlock()
+	f.logger.Warn(nil, "excluded table renamed; its new name is excluded until restart, add it to the exclude list", loglib.Fields{
+		"schema":    obj.Schema,
+		"old_table": oldTable,
+		"new_table": newTable,
+	})
+	return true
+}
+
+func (f *Filter) isRenamedExcluded(schema, table string) bool {
+	f.renamedMu.RLock()
+	defer f.renamedMu.RUnlock()
+	return f.renamedExcluded.ContainsExactSchemaTable(schema, table)
 }
