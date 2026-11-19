@@ -32,13 +32,15 @@ type BatchWriter struct {
 	// CONCURRENTLY) cannot run in a transaction block. A lazily-opened
 	// connection keeps both statements in one session while costing nothing
 	// until a DDL event actually arrives.
-	ddlConn ddlConnection
+	ddlConn         ddlConnection
+	appliedDDLReady bool
 }
 
 // ddlConnection is the subset of pglib.LazyConn the batch writer needs, so a
 // test can supply its own connection without dialling.
 type ddlConnection interface {
 	Acquire(ctx context.Context) (pglib.Querier, error)
+	Lost() bool
 	Close(ctx context.Context) error
 }
 
@@ -171,38 +173,12 @@ func (w *BatchWriter) sendBatch(ctx context.Context, b *batch.Batch[*walMessage]
 					w.logger.Error(err, "converting DDL event to queries")
 					return err
 				}
-				for _, q := range ddlQueries {
+				info := newDDLEventInfo(msg.data)
+				for i, q := range ddlQueries {
 					if q.IsEmpty() {
 						continue
 					}
-					// The default search path is "$user",public, so a role
-					// sharing its name with pgstream's own internal schema
-					// silently creates the object there instead of in the
-					// target schema. Pin it to the schema the event was
-					// captured in. Both statements run on the same connection,
-					// so the setting is guaranteed to apply to the statement it
-					// is meant for; nothing else uses that connection, so there
-					// is nothing to restore it to afterwards.
-					ddlConn, err := w.ddlConn.Acquire(ctx)
-					if err != nil {
-						w.logger.Error(err, "acquiring DDL connection")
-						return err
-					}
-					if q.schema != "" {
-						if _, err := ddlConn.Exec(ctx, `SELECT pg_catalog.set_config('search_path', $1, false)`, q.schema); err != nil {
-							w.logger.Error(err, "setting search path for DDL query", loglib.Fields{"schema": q.schema})
-							return err
-						}
-					}
-					if _, err := ddlConn.Exec(ctx, q.sql, q.args...); err != nil {
-						w.logger.Error(err, "running DDL query", loglib.Fields{"query_sql": q.sql, "query_args": q.args})
-						if !w.isInternalError(err) {
-							if w.strictMode {
-								return fmt.Errorf("strict mode: stopping on non-internal DDL failure: %w", err)
-							}
-							w.recordDroppedQuery(q, err)
-							continue
-						}
+					if err := w.execDDL(ctx, q, newDDLPosition(msg.data.LSN, i), info); err != nil {
 						return err
 					}
 				}

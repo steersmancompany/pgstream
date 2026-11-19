@@ -18,6 +18,7 @@ var (
 )
 
 type ErrRelationDoesNotExist struct {
+	Code    string
 	Details string
 }
 
@@ -145,6 +146,7 @@ func MapError(err error) error {
 			// 42P02 	undefined_parameter
 			// 42704 	undefined_object
 			return &ErrRelationDoesNotExist{
+				Code:    pgErr.Code,
 				Details: pgErr.Message,
 			}
 		case "42601", "42000":

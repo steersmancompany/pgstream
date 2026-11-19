@@ -83,6 +83,13 @@ func (c *Conn) Ping(ctx context.Context) error {
 	return MapError(c.conn.Ping(ctx))
 }
 
+// IsClosed reports whether the connection is unusable. A network error on any
+// call closes it, so this is how a caller tells a lost connection from a
+// statement the server rejected.
+func (c *Conn) IsClosed() bool {
+	return c.conn.IsClosed()
+}
+
 func (c *Conn) Close(ctx context.Context) error {
 	return MapError(c.conn.Close(ctx))
 }

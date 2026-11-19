@@ -715,3 +715,4 @@ type stubDDLConn struct{ q pglib.Querier }
 
 func (s stubDDLConn) Acquire(context.Context) (pglib.Querier, error) { return s.q, nil }
 func (s stubDDLConn) Close(context.Context) error                    { return nil }
+func (s stubDDLConn) Lost() bool                                     { return false }
